@@ -1,0 +1,57 @@
+kafka:
+  bootstrap_servers: "localhost:9092"
+  topic: "user-events"
+  group_id: "movie-rec-consumer-group"
+  auto_offset_reset: "earliest"
+
+# 本地SQLite存储（开发环境）
+database:
+  path: "database/movie_rec.db"
+
+# AWS S3和DynamoDB配置（生产环境）
+aws:
+  region: "us-east-1"
+  # 如果在本地开发，可以使用LocalStack
+  # endpoint_url: "http://localhost:4566"  # LocalStack endpoint
+  
+  s3:
+    bucket: "movie-rec-data-lake"
+    bronze_prefix: "bronze/user-events/"
+    silver_prefix: "silver/"
+    gold_prefix: "gold/"
+  
+  dynamodb:
+    user_features_table: "movie-rec-user-features"
+    movie_features_table: "movie-rec-movie-features"
+
+# 存储模式: "sqlite" (开发) 或 "aws" (生产)
+storage_mode: "sqlite"
+
+model:
+  # 协同过滤参数
+  collaborative_filtering:
+    n_neighbors: 20
+    min_common_items: 3
+    similarity_threshold: 0.1
+  
+  # 基于内容的推荐参数
+  content_based:
+    top_n_similar_movies: 50
+  
+  # 混合模型权重
+  hybrid:
+    cf_weight: 0.6
+    content_weight: 0.4
+  
+  # 推荐参数
+  recommendation:
+    top_n: 20
+    min_rating_threshold: 3.0
+
+api:
+  host: "0.0.0.0"
+  port: 8082
+
+logging:
+  level: "INFO"
+

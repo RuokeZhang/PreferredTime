@@ -1,0 +1,79 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Logs
+logs/*.log
+*.log
+
+# Database (通常不打包到镜像)
+database/*.db
+database/*.db-journal
+
+# 文档
+*.md
+!README.md
+
+# 测试
+tests/
+test_*.py
+*_test.py
+
+# Airflow (不需要在容器中)
+airflow_dags/
+
+# Kafka相关
+kafka_consumer/
+
+# Docker相关
+docker-compose.yml
+Dockerfile
+.dockerignore
+
+# AWS配置
+setup_aws.py
+
+# 其他脚本
+*.sh
+check_*.py
+test_*.py
+
+
