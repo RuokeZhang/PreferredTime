@@ -2,10 +2,13 @@ import os
 import sys
 import yaml
 import json
+from datetime import datetime
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import PlainTextResponse, JSONResponse
 import pandas as pd
 from typing import Optional
+from pydantic import BaseModel, Field
+from kafka import KafkaProducer
 
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -26,6 +29,20 @@ data_storage = None
 storage_mode = None
 redis_client = None
 redis_enabled = False
+kafka_producer = None
+kafka_enabled = False
+kafka_topic = None
+
+
+class UserEvent(BaseModel):
+    """API接收的用户事件（评分）"""
+    user_id: int = Field(..., ge=1, description="用户ID")
+    movie_id: int = Field(..., ge=1, description="电影ID")
+    rating: float = Field(..., ge=0.0, le=5.0, description="评分(0-5)")
+    timestamp: Optional[str] = Field(
+        default=None,
+        description="ISO8601时间戳字符串，可选；不传则由服务端补齐"
+    )
 
 
 def load_config():
@@ -72,6 +89,43 @@ def initialize_redis():
         logger.warning(f"Redis连接失败，缓存功能不可用: {e}")
         redis_client = None
         redis_enabled = False
+
+
+def initialize_kafka_producer():
+    """
+    初始化Kafka Producer（用于API接收事件后写入Kafka，形成流式入口）
+    """
+    global kafka_producer, kafka_enabled, kafka_topic, config
+
+    # 允许用环境变量快速开关（默认开启）
+    kafka_enabled = os.environ.get('KAFKA_PRODUCER_ENABLED', 'true').lower() == 'true'
+    if not kafka_enabled:
+        logger.info("Kafka Producer 未启用（KAFKA_PRODUCER_ENABLED=false）")
+        kafka_producer = None
+        return
+
+    try:
+        if not config:
+            config = load_config()
+
+        kafka_cfg = config.get('kafka', {})
+        bootstrap_servers = os.environ.get('KAFKA_BOOTSTRAP_SERVERS', kafka_cfg.get('bootstrap_servers', 'localhost:9092'))
+        kafka_topic = os.environ.get('KAFKA_TOPIC', kafka_cfg.get('topic', 'user-events'))
+
+        # 生产级通常还会配置 acks/retries/batching；这里给出相对稳妥的默认值
+        kafka_producer = KafkaProducer(
+            bootstrap_servers=bootstrap_servers,
+            value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+            acks='all',
+            retries=3,
+            linger_ms=20
+        )
+
+        logger.info(f"✓ Kafka Producer 初始化完成: bootstrap_servers={bootstrap_servers}, topic={kafka_topic}")
+    except Exception as e:
+        kafka_producer = None
+        logger.error(f"Kafka Producer 初始化失败: {e}")
+        # API仍可启动，但事件入口会返回503
 
 
 def initialize_recommender():
@@ -149,6 +203,7 @@ async def startup_event():
     """应用启动时的初始化"""
     logger.info("正在启动Movie Recommendation API...")
     initialize_redis()  # 初始化Redis缓存
+    initialize_kafka_producer()  # 初始化Kafka Producer（事件入口）
     initialize_recommender()  # 初始化推荐系统
     logger.info("Movie Recommendation API启动完成")
 
@@ -165,6 +220,14 @@ async def shutdown_event():
             logger.info("Redis连接已关闭")
         except:
             pass
+    global kafka_producer
+    if kafka_producer:
+        try:
+            kafka_producer.flush(timeout=3)
+            kafka_producer.close()
+            logger.info("Kafka Producer 已关闭")
+        except Exception as e:
+            logger.warning(f"关闭Kafka Producer 失败: {e}")
     logger.info("Movie Recommendation API已关闭")
 
 
@@ -191,7 +254,10 @@ async def health_check():
         "recommender_loaded": recommender is not None,
         "storage_connected": data_storage is not None,
         "redis_enabled": redis_enabled,
-        "redis_connected": redis_client is not None
+        "redis_connected": redis_client is not None,
+        "kafka_producer_enabled": kafka_enabled,
+        "kafka_producer_ready": kafka_producer is not None,
+        "kafka_topic": kafka_topic
     }
     
     if data_storage is not None:
@@ -210,6 +276,40 @@ async def health_check():
             status["redis_connected"] = False
     
     return status
+
+
+@app.post("/events")
+async def ingest_user_event(event: UserEvent):
+    """
+    事件入口：从外部API“流式接收”用户事件，然后写入Kafka（user-events topic）。
+
+    这使得系统具备典型的数据管道形态：
+    API Producer -> Kafka -> Consumer -> (S3/SQLite 等存储)
+    """
+    if not kafka_enabled:
+        raise HTTPException(status_code=503, detail="Kafka Producer 未启用")
+    if kafka_producer is None or not kafka_topic:
+        raise HTTPException(status_code=503, detail="Kafka Producer 未就绪")
+
+    # pydantic v2: model_dump(); v1: dict()
+    payload = event.model_dump() if hasattr(event, "model_dump") else event.dict()
+    if not payload.get("timestamp"):
+        payload["timestamp"] = datetime.utcnow().isoformat()
+
+    try:
+        future = kafka_producer.send(kafka_topic, payload)
+        record = future.get(timeout=2)  # 等待broker ack，便于面试演示“写入成功”
+
+        return {
+            "status": "queued",
+            "topic": record.topic,
+            "partition": record.partition,
+            "offset": record.offset,
+            "event": payload
+        }
+    except Exception as e:
+        logger.error(f"写入Kafka失败: {e}")
+        raise HTTPException(status_code=500, detail=f"写入Kafka失败: {str(e)}")
 
 
 @app.get("/recommend/{user_id}", response_class=PlainTextResponse)

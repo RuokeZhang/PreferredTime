@@ -260,6 +260,30 @@ producer.send('user-events', event)
 producer.flush()
 ```
 
+### 通过API“流式”发送事件（推荐演示方式）
+
+项目新增了事件入口：`POST /events`。外部系统可以把用户行为/评分事件持续POST到该接口，API 内部作为 **Kafka Producer** 将事件写入 `user-events` topic，然后由 `kafka_consumer/consumer.py` 消费并落地（SQLite 或 S3）。
+
+1) 启动全链路（Kafka + consumer + API）：
+
+```bash
+./run.sh
+```
+
+2) 单条发送（示例）：
+
+```bash
+curl -X POST http://localhost:8082/events \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":1,"movie_id":100,"rating":4.5,"timestamp":"2025-03-15T10:30:00"}'
+```
+
+3) 模拟“流式发送”（持续推送）：
+
+```bash
+python3 scripts/simulate_event_stream.py --api-url http://localhost:8082/events --rate 5 --duration 30
+```
+
 ## 推荐算法
 
 本系统采用混合推荐策略，结合以下方法：
