@@ -162,9 +162,14 @@ def initialize_recommender():
                 recommender = model_data['model']
                 rating_matrix = model_data['rating_matrix']
                 
+                # 注入 Feature Store（DynamoDB），让模型能读取实时特征
+                recommender.feature_store = data_storage
+                recommender._movie_features_cache = {}  # 重置缓存
+                
                 logger.info(f"✓ 预训练模型加载成功")
                 logger.info(f"  - 评分矩阵: {rating_matrix.shape[0]} 用户 x {rating_matrix.shape[1]} 电影")
                 logger.info(f"  - 模型时间戳: {model_data.get('timestamp', 'unknown')}")
+                logger.info(f"  - Feature Store: {'已接入 (DynamoDB)' if storage_mode == 'aws' else '已接入 (SQLite)'}")
                 return
                 
             except Exception as e:
@@ -189,9 +194,13 @@ def initialize_recommender():
         
         logger.info(f"评分矩阵构建完成: {rating_matrix.shape[0]} 用户 x {rating_matrix.shape[1]} 电影")
         
-        # 初始化混合推荐模型
-        recommender = HybridRecommender(rating_matrix, config['model'])
-        logger.info("✓ 混合推荐模型初始化完成（实时构建模式）")
+        # 初始化混合推荐模型（传入 Feature Store 用于读取 DynamoDB 实时特征）
+        recommender = HybridRecommender(
+            rating_matrix, 
+            config['model'],
+            feature_store=data_storage  # 接入 DynamoDB 特征
+        )
+        logger.info(f"✓ 混合推荐模型初始化完成（实时构建模式，Feature Store 已接入）")
         
     except Exception as e:
         logger.error(f"初始化推荐系统失败: {e}")
@@ -298,7 +307,7 @@ async def ingest_user_event(event: UserEvent):
 
     try:
         future = kafka_producer.send(kafka_topic, payload)
-        record = future.get(timeout=2)  # 等待broker ack，便于面试演示“写入成功”
+        record = future.get(timeout=2)  # 等待broker ack
 
         return {
             "status": "queued",

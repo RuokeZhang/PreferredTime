@@ -1,5 +1,5 @@
 import pandas as pd
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 from models.collaborative_filtering import CollaborativeFiltering
 from models.content_based import ContentBasedRecommender
 from utils.logger import setup_logger
@@ -8,18 +8,29 @@ logger = setup_logger(__name__)
 
 
 class HybridRecommender:
-    """混合推荐模型，结合协同过滤和基于内容的推荐"""
+    """
+    混合推荐模型，结合协同过滤和基于内容的推荐
     
-    def __init__(self, rating_matrix: pd.DataFrame, config: Dict):
+    企业级特性：
+    - 支持 Feature Store (DynamoDB) 实时特征
+    - 用户冷启动检测与降级策略
+    - 精排阶段融合电影质量分 (popularity + avg_rating)
+    - 用户评分倾向校正
+    """
+    
+    def __init__(self, rating_matrix: pd.DataFrame, config: Dict, 
+                 feature_store=None):
         """
         初始化混合推荐模型
         
         Args:
             rating_matrix: 用户-电影评分矩阵
             config: 配置字典，包含各模型的参数
+            feature_store: 特征存储层 (HybridStorage)，用于读取 DynamoDB 实时特征
         """
         self.rating_matrix = rating_matrix
         self.config = config
+        self.feature_store = feature_store  # DynamoDB/S3 特征存储
         
         # 初始化协同过滤模型
         cf_config = config.get('collaborative_filtering', {})
@@ -41,19 +52,32 @@ class HybridRecommender:
         hybrid_config = config.get('hybrid', {})
         self.cf_weight = hybrid_config.get('cf_weight', 0.6)
         self.content_weight = hybrid_config.get('content_weight', 0.4)
+        self.quality_weight = hybrid_config.get('quality_weight', 0.2)  # 质量分权重
         
         # 推荐参数
         rec_config = config.get('recommendation', {})
         self.top_n = rec_config.get('top_n', 20)
         self.min_rating_threshold = rec_config.get('min_rating_threshold', 3.0)
+        self.cold_start_threshold = rec_config.get('cold_start_threshold', 5)  # 冷启动阈值
         
-        logger.info(f"混合推荐模型初始化完成 - CF权重: {self.cf_weight}, 内容权重: {self.content_weight}")
+        # 缓存电影特征（批量读取后缓存，避免重复查询）
+        self._movie_features_cache: Dict[int, Dict] = {}
+        
+        logger.info(f"混合推荐模型初始化完成 - CF权重: {self.cf_weight}, 内容权重: {self.content_weight}, 质量分权重: {self.quality_weight}")
+        if feature_store:
+            logger.info("✓ Feature Store (DynamoDB) 已接入，支持实时特征")
     
     def recommend(self, user_id: int, top_n: int = None,
                   use_user_based: bool = True,
                   use_item_based: bool = True) -> List[int]:
         """
-        为用户生成混合推荐
+        为用户生成混合推荐（企业级流程）
+        
+        流程：
+        1. 从 Feature Store 读取用户特征，判断冷启动
+        2. 多路召回：User-CF + Item-CF + Content-Based
+        3. 精排：融合电影质量分（从 DynamoDB 读取）
+        4. 用户评分倾向校正
         
         Args:
             user_id: 目标用户ID
@@ -67,14 +91,22 @@ class HybridRecommender:
         if top_n is None:
             top_n = self.top_n
         
+        # ========== Step 1: 用户特征 & 冷启动检测 ==========
+        user_feature = self._get_user_feature(user_id)
+        is_cold_start = self._is_cold_start_user(user_id, user_feature)
+        
+        if is_cold_start:
+            logger.info(f"用户 {user_id} 为冷启动用户，使用热门推荐 + 探索策略")
+            return self._get_popular_movies_with_exploration(top_n)
+        
         if user_id not in self.rating_matrix.index:
             logger.warning(f"用户 {user_id} 不在评分矩阵中，返回热门电影")
             return self._get_popular_movies(top_n)
         
-        # 收集不同方法的推荐结果
+        # ========== Step 2: 多路召回 ==========
         all_recommendations = {}
         
-        # 1. 基于用户的协同过滤
+        # 2.1 基于用户的协同过滤
         if use_user_based:
             try:
                 user_based_recs = self.cf_model.user_based_recommend(
@@ -85,11 +117,11 @@ class HybridRecommender:
                     user_based_recs,
                     weight=self.cf_weight * 0.5
                 )
-                logger.debug(f"用户基于CF推荐: {len(user_based_recs)} 部电影")
+                logger.debug(f"User-CF 召回: {len(user_based_recs)} 部电影")
             except Exception as e:
-                logger.error(f"用户基于CF推荐失败: {e}")
+                logger.error(f"User-CF 召回失败: {e}")
         
-        # 2. 基于物品的协同过滤
+        # 2.2 基于物品的协同过滤
         if use_item_based:
             try:
                 item_based_recs = self.cf_model.item_based_recommend(
@@ -100,11 +132,11 @@ class HybridRecommender:
                     item_based_recs,
                     weight=self.cf_weight * 0.5
                 )
-                logger.debug(f"物品基于CF推荐: {len(item_based_recs)} 部电影")
+                logger.debug(f"Item-CF 召回: {len(item_based_recs)} 部电影")
             except Exception as e:
-                logger.error(f"物品基于CF推荐失败: {e}")
+                logger.error(f"Item-CF 召回失败: {e}")
         
-        # 3. 基于内容的推荐
+        # 2.3 基于内容的推荐
         try:
             content_recs = self.content_model.recommend(
                 user_id,
@@ -116,28 +148,162 @@ class HybridRecommender:
                 content_recs,
                 weight=self.content_weight
             )
-            logger.debug(f"基于内容推荐: {len(content_recs)} 部电影")
+            logger.debug(f"Content-Based 召回: {len(content_recs)} 部电影")
         except Exception as e:
-            logger.error(f"基于内容推荐失败: {e}")
+            logger.error(f"Content-Based 召回失败: {e}")
         
-        # 如果没有推荐结果，返回热门电影
+        # 如果没有召回结果，返回热门电影
         if not all_recommendations:
-            logger.warning(f"用户 {user_id} 无推荐结果，返回热门电影")
+            logger.warning(f"用户 {user_id} 无召回结果，返回热门电影")
             return self._get_popular_movies(top_n)
         
-        # 按综合分数排序
-        sorted_recommendations = sorted(
-            all_recommendations.items(),
-            key=lambda x: x[1],
-            reverse=True
+        # ========== Step 3: 精排 - 融合电影质量分 ==========
+        ranked_recommendations = self._rerank_with_quality_score(
+            all_recommendations, user_feature
         )
         
-        # 返回前N个电影ID
-        recommended_movie_ids = [int(movie_id) for movie_id, _ in sorted_recommendations[:top_n]]
+        # ========== Step 4: 返回 Top-N ==========
+        recommended_movie_ids = [int(movie_id) for movie_id, _ in ranked_recommendations[:top_n]]
         
-        logger.info(f"为用户 {user_id} 生成 {len(recommended_movie_ids)} 个推荐")
+        logger.info(f"为用户 {user_id} 生成 {len(recommended_movie_ids)} 个推荐 (冷启动={is_cold_start})")
         
         return recommended_movie_ids
+    
+    def _get_user_feature(self, user_id: int) -> Optional[Dict]:
+        """
+        从 Feature Store (DynamoDB) 获取用户特征
+        
+        Returns:
+            用户特征字典: {avg_rating, rating_count, std_dev} 或 None
+        """
+        if self.feature_store is None:
+            return None
+        
+        try:
+            return self.feature_store.get_user_feature(user_id)
+        except Exception as e:
+            logger.warning(f"从 Feature Store 获取用户特征失败: {e}")
+            return None
+    
+    def _get_movie_feature(self, movie_id: int) -> Optional[Dict]:
+        """
+        从 Feature Store (DynamoDB) 获取电影特征（带缓存）
+        
+        Returns:
+            电影特征字典: {avg_rating, rating_count, popularity} 或 None
+        """
+        # 先查缓存
+        if movie_id in self._movie_features_cache:
+            return self._movie_features_cache[movie_id]
+        
+        if self.feature_store is None:
+            return None
+        
+        try:
+            feature = self.feature_store.get_movie_feature(movie_id)
+            if feature:
+                self._movie_features_cache[movie_id] = feature
+            return feature
+        except Exception as e:
+            logger.debug(f"获取电影 {movie_id} 特征失败: {e}")
+            return None
+    
+    def _is_cold_start_user(self, user_id: int, user_feature: Optional[Dict]) -> bool:
+        """
+        判断用户是否为冷启动用户
+        
+        策略：
+        1. 如果有 Feature Store 特征，用 rating_count 判断
+        2. 否则检查评分矩阵
+        """
+        # 优先使用 DynamoDB 特征
+        if user_feature and 'rating_count' in user_feature:
+            return user_feature['rating_count'] < self.cold_start_threshold
+        
+        # 回退到评分矩阵
+        if user_id in self.rating_matrix.index:
+            user_ratings = self.rating_matrix.loc[user_id]
+            rating_count = (user_ratings > 0).sum()
+            return rating_count < self.cold_start_threshold
+        
+        return True  # 完全没有数据，视为冷启动
+    
+    def _rerank_with_quality_score(self, candidates: Dict[int, float],
+                                   user_feature: Optional[Dict]) -> List[Tuple[int, float]]:
+        """
+        精排：融合电影质量分
+        
+        质量分 = popularity * 0.4 + avg_rating * 0.6（归一化后）
+        最终分 = 召回分 * (1 - quality_weight) + 质量分 * quality_weight
+        
+        如果有用户特征，还会做评分倾向校正
+        """
+        reranked = []
+        
+        # 用户评分倾向校正系数
+        user_bias = 0.0
+        if user_feature and 'avg_rating' in user_feature:
+            # 如果用户评分偏高（>3.5），稍微降低预测；偏低则提升
+            user_bias = (user_feature['avg_rating'] - 3.5) * 0.1
+        
+        for movie_id, recall_score in candidates.items():
+            final_score = recall_score
+            
+            # 尝试获取电影特征
+            movie_feature = self._get_movie_feature(movie_id)
+            
+            if movie_feature and self.quality_weight > 0:
+                # 计算质量分（归一化到 0-1）
+                popularity = movie_feature.get('popularity', 0)
+                avg_rating = movie_feature.get('avg_rating', 3.0)
+                
+                # popularity 通常是 log1p(rating_count)，假设范围 0-10
+                norm_popularity = min(popularity / 10.0, 1.0)
+                # avg_rating 范围 1-5，归一化到 0-1
+                norm_avg_rating = (avg_rating - 1) / 4.0
+                
+                quality_score = norm_popularity * 0.4 + norm_avg_rating * 0.6
+                
+                # 融合召回分和质量分
+                final_score = (
+                    recall_score * (1 - self.quality_weight) +
+                    quality_score * self.quality_weight * 5  # 放大到同一量级
+                )
+            
+            # 用户倾向校正
+            final_score -= user_bias
+            
+            reranked.append((movie_id, final_score))
+        
+        # 按最终分数降序排序
+        reranked.sort(key=lambda x: x[1], reverse=True)
+        
+        return reranked
+    
+    def _get_popular_movies_with_exploration(self, top_n: int) -> List[int]:
+        """
+        冷启动用户推荐策略：热门 + 探索
+        
+        80% 热门电影 + 20% 随机电影（增加多样性）
+        """
+        import random
+        
+        popular = self._get_popular_movies(int(top_n * 0.8))
+        
+        # 随机选择一些电影用于探索
+        all_movies = list(self.rating_matrix.columns)
+        explore_candidates = [m for m in all_movies if m not in popular]
+        
+        n_explore = top_n - len(popular)
+        if explore_candidates and n_explore > 0:
+            explore = random.sample(explore_candidates, min(n_explore, len(explore_candidates)))
+        else:
+            explore = []
+        
+        result = popular + explore
+        logger.info(f"冷启动推荐: {len(popular)} 热门 + {len(explore)} 探索")
+        
+        return result[:top_n]
     
     def _merge_recommendations(self, all_recs: Dict[int, float],
                               new_recs: List[Tuple[int, float]],

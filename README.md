@@ -284,6 +284,24 @@ curl -X POST http://localhost:8082/events \
 python3 scripts/simulate_event_stream.py --api-url http://localhost:8082/events --rate 5 --duration 30
 ```
 
+4) 单条同步测试（可用于验证 producer 是否工作）：
+
+```bash
+python3 scripts/test_event_ingest.py --api-url http://localhost:8082/events --user-id 7 --movie-id 88 --rating 4.2
+```
+
+### Kafka Producer 环境配置
+
+API 在启动时会尝试根据以下配置初始化 Kafka Producer，默认来源是 `config/config.yaml` 的 `kafka` 段，也可以用环境变量覆写：
+
+| 名称 | 说明 | 默认值 |
+| --- | --- | --- |
+| `KAFKA_PRODUCER_ENABLED` | 控制是否在 API 内部启用 Producer，设置为 `false` 可直接跳过 | `true` |
+| `KAFKA_BOOTSTRAP_SERVERS` | Kafka bootstrap 地址（可设置多个逗号分隔） | `localhost:9092`（同配置） |
+| `KAFKA_TOPIC` | 发送的 topic | `user-events` |
+
+只要这些配置指向本地的 Kafka（比如通过 `docker-compose.yml` 启动的），`POST /events` 就会把事件写入 Kafka，后续的 `kafka_consumer/consumer.py` 可直接消费到 S3/SQLite。若你在 AWS 上跑，那么置入真实 `KAFKA_BOOTSTRAP_SERVERS` 并把 `storage_mode` 切成 `aws` 即可。
+
 ## 推荐算法
 
 本系统采用混合推荐策略，结合以下方法：

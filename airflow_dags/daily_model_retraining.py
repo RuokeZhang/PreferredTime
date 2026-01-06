@@ -98,3 +98,4 @@ reload_api_task = SimpleHttpOperator(
 validate_data_task >> extract_features_task >> train_model_task >> evaluate_model_task >> deploy_model_task >> reload_api_task
 
 
+

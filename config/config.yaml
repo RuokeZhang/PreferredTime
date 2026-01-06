@@ -42,11 +42,13 @@ model:
   hybrid:
     cf_weight: 0.6
     content_weight: 0.4
+    quality_weight: 0.2  # 精排阶段电影质量分权重（从DynamoDB读取popularity/avg_rating）
   
   # 推荐参数
   recommendation:
     top_n: 20
     min_rating_threshold: 3.0
+    cold_start_threshold: 5  # 评分数<此值视为冷启动用户，使用热门+探索策略
 
 api:
   host: "0.0.0.0"

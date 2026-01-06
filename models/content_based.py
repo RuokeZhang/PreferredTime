@@ -7,51 +7,116 @@ logger = setup_logger(__name__)
 
 
 class ContentBasedRecommender:
-    """基于内容的推荐模型"""
+    """基于内容的推荐模型
     
-    def __init__(self, rating_matrix: pd.DataFrame, top_n_similar_movies: int = 50):
+    说明：
+    - 如果提供了 movie_metadata（包含电影特征），则使用元数据计算相似度
+    - 如果未提供元数据，则回退为“基于评分模式”的相似度（原先的实现）
+    """
+    
+    def __init__(self, rating_matrix: pd.DataFrame, top_n_similar_movies: int = 50,
+                 movie_metadata: pd.DataFrame = None):
         """
         初始化基于内容的推荐模型
         
         Args:
             rating_matrix: 用户-电影评分矩阵
             top_n_similar_movies: 为每部电影考虑的相似电影数量
+            movie_metadata: 电影元数据DataFrame，需包含 movie_id 列；可选列：
+                - genres: 字符串/列表，形如 "Action|Drama"
+                - release_year / runtime / popularity / vote_average / vote_count 等数值列
         """
         self.rating_matrix = rating_matrix
         self.top_n_similar_movies = top_n_similar_movies
+        self.movie_metadata = movie_metadata
         
-        # 预计算电影相似度
-        self.movie_similarity_matrix = self._compute_movie_similarity_matrix()
+        # 预计算电影相似度：优先用元数据，否则回退到评分模式
+        if self.movie_metadata is not None and len(self.movie_metadata) > 0:
+            logger.info("使用电影元数据计算内容相似度")
+            self.movie_similarity_matrix = self._compute_similarity_from_metadata(self.movie_metadata)
+        else:
+            logger.info("未提供电影元数据，回退为基于评分模式的相似度")
+            self.movie_similarity_matrix = self._compute_similarity_from_ratings()
     
-    def _compute_movie_similarity_matrix(self) -> pd.DataFrame:
-        """
-        计算电影相似度矩阵（基于用户评分模式）
-        使用余弦相似度
-        """
-        logger.info("计算电影相似度矩阵...")
-        
-        # 转置矩阵，行为电影，列为用户
+    def _compute_similarity_from_ratings(self) -> pd.DataFrame:
+        """基于评分矩阵（行为电影，列为用户）的余弦相似度"""
         movie_matrix = self.rating_matrix.T
-        
-        # 计算余弦相似度
-        # 归一化每个电影向量
         movie_norms = np.linalg.norm(movie_matrix.values, axis=1, keepdims=True)
         movie_norms[movie_norms == 0] = 1  # 避免除以零
-        
         normalized_matrix = movie_matrix.values / movie_norms
-        
-        # 计算相似度矩阵
         similarity_matrix = np.dot(normalized_matrix, normalized_matrix.T)
-        
-        # 创建DataFrame
         similarity_df = pd.DataFrame(
             similarity_matrix,
             index=movie_matrix.index,
             columns=movie_matrix.index
         )
+        logger.info(f"电影相似度矩阵（评分回退）计算完成: {similarity_df.shape}")
+        return similarity_df
+    
+    def _compute_similarity_from_metadata(self, meta: pd.DataFrame) -> pd.DataFrame:
+        """
+        基于电影元数据构建特征向量并计算余弦相似度。
+        - 对 genres 做 one-hot
+        - 对数值特征做标准化到 [0,1]
+        """
+        df = meta.copy()
+        if 'movie_id' not in df.columns:
+            raise ValueError("movie_metadata 需要包含 movie_id 列")
+        df = df.set_index('movie_id')
         
-        logger.info(f"电影相似度矩阵计算完成: {similarity_df.shape}")
+        feature_blocks = []
         
+        # 1) 处理 genres（字符串分割或列表），做 one-hot
+        if 'genres' in df.columns:
+            def split_genres(x):
+                if isinstance(x, str):
+                    return x.replace(',', '|').split('|')
+                if isinstance(x, list):
+                    return x
+                return []
+            genres_series = df['genres'].apply(split_genres)
+            all_genres = sorted({g for lst in genres_series for g in lst if g})
+            genre_matrix = pd.DataFrame(0, index=df.index, columns=all_genres, dtype=float)
+            for mid, lst in genres_series.items():
+                for g in lst:
+                    if g:
+                        genre_matrix.at[mid, g] = 1.0
+            feature_blocks.append(genre_matrix)
+        
+        # 2) 数值特征：可选列
+        numeric_cols = [c for c in ['release_year', 'runtime', 'popularity', 'vote_average', 'vote_count']
+                        if c in df.columns]
+        if numeric_cols:
+            num_block = df[numeric_cols].astype(float).fillna(0)
+            # 简单 min-max 归一化
+            for col in num_block.columns:
+                col_min, col_max = num_block[col].min(), num_block[col].max()
+                if col_max > col_min:
+                    num_block[col] = (num_block[col] - col_min) / (col_max - col_min)
+                else:
+                    num_block[col] = 0.0
+            feature_blocks.append(num_block)
+        
+        if not feature_blocks:
+            logger.warning("movie_metadata 中没有可用特征列，回退到评分相似度")
+            return self._compute_similarity_from_ratings()
+        
+        # 拼接所有特征
+        feature_matrix = pd.concat(feature_blocks, axis=1).fillna(0)
+        
+        # 计算余弦相似度
+        norms = np.linalg.norm(feature_matrix.values, axis=1, keepdims=True)
+        norms[norms == 0] = 1
+        normalized = feature_matrix.values / norms
+        sim_matrix = np.dot(normalized, normalized.T)
+        
+        similarity_df = pd.DataFrame(
+            sim_matrix,
+            index=feature_matrix.index,
+            columns=feature_matrix.index
+        )
+        
+        logger.info(f"电影相似度矩阵（元数据）计算完成: {similarity_df.shape}")
         return similarity_df
     
     def recommend(self, user_id: int, top_n: int = 20,
@@ -192,5 +257,6 @@ class ContentBasedRecommender:
         }
         
         return profile
+
 
 
