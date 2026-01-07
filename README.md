@@ -46,8 +46,9 @@
     - 遍历所有电影，对于每个电影，拿出相似用户给他们的评分，用similarity做weighted rating，则可以得到该用户对此电影的评分
 7. content-based：用电影的metadata做相似度矩阵
 8. rerank
-    - quality score=流行度*0.4 + 平均评分*0.6
+    - quality score=movie流行度*0.4 + 平均评分*0.6
     - final score=recall_score*(1-quality weight) + quality score*quality weight
+    - 根据用户的rating_count，去采用不同的quality_weight。用户rating_count越少，越依赖热门高分电影
 
 
 ## 模型评估

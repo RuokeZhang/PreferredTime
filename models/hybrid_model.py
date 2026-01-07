@@ -231,28 +231,46 @@ class HybridRecommender:
     def _rerank_with_quality_score(self, candidates: Dict[int, float],
                                    user_feature: Optional[Dict]) -> List[Tuple[int, float]]:
         """
-        精排：融合电影质量分
+        精排：融合电影质量分 + 用户活跃度自适应权重
         
         质量分 = popularity * 0.4 + avg_rating * 0.6（归一化后）
-        最终分 = 召回分 * (1 - quality_weight) + 质量分 * quality_weight
         
-        如果有用户特征，还会做评分倾向校正
+        用户活跃度策略：
+        - 新用户（rating_count < 10）：更依赖 quality_score（热门高分电影）
+        - 中等用户（10-50）：平衡 recall 和 quality
+        - 活跃用户（rating_count > 50）：更依赖 recall_score（个性化推荐）
+        
+        最终分 = 召回分 * (1 - effective_quality_weight) + 质量分 * effective_quality_weight
         """
         reranked = []
         
-        # 用户评分倾向校正系数
-        user_bias = 0.0
-        if user_feature and 'avg_rating' in user_feature:
-            # 如果用户评分偏高（>3.5），稍微降低预测；偏低则提升
-            user_bias = (user_feature['avg_rating'] - 3.5) * 0.1
+        # ========== 根据用户活跃度动态调整 quality_weight ==========
+        user_rating_count = 0
+        if user_feature and 'rating_count' in user_feature:
+            user_rating_count = user_feature['rating_count']
+        
+        # 活跃度越高，quality_weight 越低（更信任个性化召回）
+        # rating_count: 0-10 → quality_weight: 0.5
+        # rating_count: 10-50 → quality_weight: 0.3
+        # rating_count: 50+ → quality_weight: 0.1
+        if user_rating_count < 10:
+            effective_quality_weight = 0.5  # 新用户：质量分占 50%
+        elif user_rating_count < 50:
+            # 线性插值：10→0.5, 50→0.1
+            effective_quality_weight = 0.5 - (user_rating_count - 10) * (0.4 / 40)
+        else:
+            effective_quality_weight = 0.1  # 活跃用户：质量分只占 10%
+        
+        logger.debug(f"用户活跃度调整: rating_count={user_rating_count}, "
+                    f"effective_quality_weight={effective_quality_weight:.2f}")
         
         for movie_id, recall_score in candidates.items():
             final_score = recall_score
             
-            # 尝试获取电影特征
+            # 尝试获取电影特征（从 DynamoDB）
             movie_feature = self._get_movie_feature(movie_id)
             
-            if movie_feature and self.quality_weight > 0:
+            if movie_feature and effective_quality_weight > 0:
                 # 计算质量分（归一化到 0-1）
                 popularity = movie_feature.get('popularity', 0)
                 avg_rating = movie_feature.get('avg_rating', 3.0)
@@ -264,14 +282,11 @@ class HybridRecommender:
                 
                 quality_score = norm_popularity * 0.4 + norm_avg_rating * 0.6
                 
-                # 融合召回分和质量分
+                # 融合召回分和质量分（使用动态权重）
                 final_score = (
-                    recall_score * (1 - self.quality_weight) +
-                    quality_score * self.quality_weight * 5  # 放大到同一量级
+                    recall_score * (1 - effective_quality_weight) +
+                    quality_score * effective_quality_weight * 5  # 放大到同一量级
                 )
-            
-            # 用户倾向校正
-            final_score -= user_bias
             
             reranked.append((movie_id, final_score))
         
