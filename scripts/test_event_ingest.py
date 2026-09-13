@@ -1,23 +1,30 @@
 """
-快速验证 POST /events 接口是否正常运行、KafkaProducer 是否能写入
+快速验证 POST /v1/events 接口是否正常运行、KafkaProducer 是否能写入
 
 用法示例：
   python3 scripts/test_event_ingest.py \
-    --api-url http://localhost:8082/events \
+    --api-url http://localhost:8082/v1/events \
     --user-id 123 \
     --movie-id 456 \
     --rating 4.0
 """
 
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 import requests
 import json
+import uuid
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="向 /events 发送单条用户评分事件进行测试")
-    parser.add_argument("--api-url", default="http://localhost:8082/events", help="FastAPI 事件入口 URL")
+    parser = argparse.ArgumentParser(
+        description="向 /v1/events 发送单条用户评分事件进行测试"
+    )
+    parser.add_argument(
+        "--api-url",
+        default="http://localhost:8082/v1/events",
+        help="FastAPI 事件入口 URL",
+    )
     parser.add_argument("--user-id", type=int, default=1, help="用户 ID")
     parser.add_argument("--movie-id", type=int, default=100, help="电影 ID")
     parser.add_argument("--rating", type=float, default=4.5, help="评分")
@@ -28,10 +35,11 @@ def parse_args():
 def main():
     args = parse_args()
     payload = {
+        "event_id": str(uuid.uuid4()),
         "user_id": args.user_id,
         "movie_id": args.movie_id,
         "rating": args.rating,
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
     print(f"发送事件：{json.dumps(payload)}")
@@ -49,4 +57,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

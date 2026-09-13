@@ -60,4 +60,7 @@ docker-compose.override.yml
 *.model
 
 
-
+artifacts/
+data/ml-25m/
+*.pyc
+__pycache__/

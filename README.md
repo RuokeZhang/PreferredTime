@@ -1,102 +1,117 @@
-# Movie Recommendation Platform
+# PreferredTime
 
-一个基于混合推荐算法的电影推荐平台，结合协同过滤和基于内容的推荐方法。
+An offline-first movie recommendation system for measuring the trade-offs among retrieval, ranking, diversity, and CPU latency on MovieLens-25M.
 
-## 项目简介
+## Experiment matrix
 
-本项目实现了一个完整的**生产级**电影推荐系统，包括：
-- **事件驱动架构**: Kinesis Stream + Lambda触发推荐
-- **高性能缓存**: ElastiCache (Redis)
-- **容器化部署**: Docker + ECR + ECS Fargate
-- **实时数据流**: Kafka处理用户行为事件
-- **混合推荐模型**: 协同过滤 + 基于内容推荐
-- **自动化训练**: Airflow调度的每日模型更新
-- **完整评估体系**: Precision/Recall/NDCG等业界标准指标
+The repository generates this table from a global temporal test split. Cells remain blank until the MovieLens-25M experiment is run; no result is estimated or copied from another system.
 
-## 流程
-1. 新建KafkaProducer
-    ```py
-    kafka_producer = KafkaProducer(
-            bootstrap_servers=bootstrap_servers,
-            value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-            acks='all',
-            retries=3,
-            linger_ms=20
-        )
-    ```
-2. 接收user events, ```ingest_user_event```
-    ```py
-    future = kafka_producer.send(kafka_topic, payload)
-    record = future.get(timeout=2)  # 等待broker ack
-    ```
-3. 新建一个KafkaConsumer， 配置其订阅的topic和监听的server，以及定义它的group_id（真正的开始）
-4. ```for message in self.consumer:```持续拉取消息，并对每个消息里传来的event做```process_event```
-    - 一个event包含user_id, movie_id, rating, timestamp
-    - save_rating, S3实现中，用save_raw_event把原始event json保存到S3，（按日期分区）
-5. Airflow批处理任务 validate_data >> extract_features_task >> train_model_task >> evaluate_model_task >> deploy_model_task >> reload_api_task
-    - validate_data: 从S3拿到当天的数据，进行检验
-    - extract_features_batch: 从S3拿到所有rating，分别计算用户和电影的特征。update_user_feature，把每个user的特征更新到dynamoDB
-    - train_hybrid_model
-        - build_user_item_matrix：拿到所有的rating，做一个列为movie_id,行为user_id的matrix
-        - 训练模型HybridRecommender（CollaborativeFiltering+ContentBasedRecommender）。CollaborativeFiltering其实在初始化阶段并没有生成相似度矩阵，只是存了这个rating matrix; ContentBasedRecommender在初始化阶段预计算了电影的相似度矩阵
-    - evaluate_model：划分测试集，为测试用户生成推荐
-    - 调用movie_rec_api中的/reload,用保存好的模型pkl文件直接替换掉recommender
-6. user-based recommend
-    - 计算用户相似度列表。对于每个用户，遍历其它所有用户，找到共同评分过的电影，然后算cosine similarity. 对于该用户，最后返回相似度高于某个阈值的用户列表，相似度降序排序
-    - 遍历所有电影，对于每个电影，拿出相似用户给他们的评分，用similarity做weighted rating，则可以得到该用户对此电影的评分
-7. content-based：用电影的metadata做相似度矩阵
-8. rerank
-    - quality score=movie流行度*0.4 + 平均评分*0.6
-    - final score=recall_score*(1-quality weight) + quality score*quality weight
-    - 根据用户的rating_count，去采用不同的quality_weight。用户rating_count越少，越依赖热门高分电影
+| Variant | Recall@20 | NDCG@10 | Coverage | Diversity | P99 (ms) |
+|---|---:|---:|---:|---:|---:|
+| Popularity | | | | | |
+| ALS + ANN | | | | | |
+| + semantic retrieval | | | | | |
+| + LightGBM LambdaRank | | | | | |
+| + MMR | | | | | |
 
+`scripts/run_offline_experiment.py` writes measured values to `experiment_matrix.json` inside the versioned artifact directory.
 
-## 模型评估
-### 质量阈值
+Measure ANN approximation loss and latency against exact cosine search with:
 
-模型必须满足以下最低要求才能部署到生产环境：
-
-| 指标 | 最低要求 |
-|------|---------|
-| Precision@10 | ≥ 1% |
-| Hit Rate@10 | ≥ 10% |
-| Coverage | ≥ 5% |
-| Evaluated Users | ≥ 10 |
-
-### 评估指标
-
-#### 准确率指标
-- **Precision@K**: 推荐准确率 - 推荐列表中相关物品的比例
-- **Recall@K**: 召回率 - 相关物品被推荐的比例
-- **F1-Score@K**: Precision和Recall的调和平均
-- **NDCG@K**: 归一化折损累积增益 - 考虑排序位置的质量指标
-- **Hit Rate@K**: 命中率 - 至少推荐一个相关物品的用户比例
-
-#### 系统级指标
-- **Coverage**: 推荐覆盖率 - 推荐系统能够推荐的不同物品比例
-- **Diversity**: 多样性 - 不同用户推荐列表的差异度
-
-
-## 配置
-
-编辑 `config/config.yaml` 来调整系统参数：
-
-```yaml
-model:
-  collaborative_filtering:
-    n_neighbors: 20              # 相似用户/电影数量
-    min_common_items: 3          # 最少共同项
-    similarity_threshold: 0.1    # 相似度阈值
-  
-  content_based:
-    top_n_similar_movies: 50     # 考虑的相似电影数量
-  
-  hybrid:
-    cf_weight: 0.6               # 协同过滤权重
-    content_weight: 0.4          # 基于内容权重
-  
-  recommendation:
-    top_n: 20                    # 推荐数量
-    min_rating_threshold: 3.0    # 最低评分阈值
+```bash
+python3 -m scripts.benchmark_ann --model-version <training_cutoff>-<git_sha>
 ```
 
+## Implemented pipeline
+
+1. Ratings are converted to implicit positives at a configurable threshold and split by global timestamps. The validation and test windows are never included in training aggregates.
+2. Implicit ALS produces user and item embeddings. Exact cosine or hnswlib indexes support user-to-item and item-to-item retrieval.
+3. Genre and MovieLens genome vectors form an independent semantic route. Popularity provides a cold-user fallback.
+4. Reciprocal-rank fusion deduplicates all routes and caps the ranker input at 500 candidates.
+5. LightGBM LambdaRank scores candidates by user, item, and retrieval-route features. Negatives are sampled from retrieved but unobserved items.
+6. MMR reranks the top 100 into a top-20 list while explicitly trading relevance for intra-list diversity.
+7. Offline evaluation ranks over the retrievable catalog after removing training history; it does not use a sampled 100-negative test set.
+
+The service loads one immutable `{model_type}/{training_cutoff}-{git_sha}` artifact at startup. Requests report the model version, candidate count, per-route candidate counts, and retrieval/ranking/reranking latency. Switching versions requires an instance restart; there is no process-local `/reload` endpoint.
+
+## Reproduce the experiment
+
+Download MovieLens-25M and run:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python3 -m scripts.run_offline_experiment \
+  --ratings data/ml-25m/ratings.csv \
+  --movies data/ml-25m/movies.csv \
+  --genome-scores data/ml-25m/genome-scores.csv \
+  --output artifacts \
+  --backend hnsw \
+  --s3-model-bucket preferredtime-models
+```
+
+For a quick pipeline check, add `--limit-users 100`. That option is for development only and must not be used for the final reported matrix.
+
+To compare a candidate with production, pass a JSON file containing the production metrics:
+
+```bash
+python3 -m scripts.run_offline_experiment \
+  --ratings data/ml-25m/ratings.csv \
+  --movies data/ml-25m/movies.csv \
+  --genome-scores data/ml-25m/genome-scores.csv \
+  --production-metrics artifacts/production-metrics.json
+```
+
+Publication is blocked if Recall@20 or NDCG@10 regresses by more than 2%, end-to-end P99 exceeds 100 ms, or the shared feature transform is not covered by the consistency check.
+
+## Serve a version
+
+```bash
+export MODEL_ROOT=artifacts
+export MODEL_TYPE=lambdarank
+export MODEL_VERSION=<training_cutoff>-<git_sha>
+export MODEL_S3_BUCKET=preferredtime-models
+uvicorn api.main:app --host 0.0.0.0 --port 8082
+```
+
+Endpoints:
+
+- `GET /health/live`: process health
+- `GET /health/ready`: artifact readiness and active model version
+- `GET /v1/recommendations?user_id=1&limit=20`: synchronous recommendation
+- `POST /v1/events`: optional Kafka event ingestion
+
+Set `KAFKA_PRODUCER_ENABLED=true` to enable the event endpoint. It is disabled by default so a missing broker cannot delay model serving startup.
+
+## Batch and event path
+
+The Airflow DAG validates the MovieLens inputs and runs the deterministic train → evaluate → publish command daily. Model artifacts are versioned; the DAG does not mutate a running process.
+
+The optional event path is FastAPI → Kafka → consumer → date-partitioned S3 JSON. Kafka auto-commit is disabled. The consumer writes `event_id` as the S3 object key and commits the offset only after the write succeeds, giving at-least-once delivery with idempotent downstream storage. `config/config.yaml` specifies three partitions as the intended upper bound for consumer parallelism; throughput, lag, rebalance recovery, and partition selection still require a recorded load test before this path should be described as production-ready.
+
+## Tests
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+CI checks temporal isolation, full-catalog metrics, route fusion, hard-negative sampling, feature transforms, MMR behavior, versioned artifacts, and relative quality gates.
+
+## Non-goals
+
+- Online A/B testing: there is no real user traffic.
+- Second-level online feature refresh: MovieLens is an offline dataset; batch refresh is sufficient.
+- Distributed or GPU training: MovieLens-25M fits on one machine.
+- Multi-objective ranking: ratings provide only one meaningful target.
+- Multi-region availability, failover, or speculative caching.
+
+## Known limitations
+
+- MovieLens has no exposure log. Ranker negatives are sampled, so the project cannot estimate or correct position and exposure bias.
+- Every quality conclusion is offline until a real traffic source exists.
+- Genre and genome features do not provide the full-catalog semantic coverage planned for TMDB overview tagging.
+- The controlled-vocabulary LLM tagger, genome-agreement study, sequential-ranker comparison, threshold sensitivity sweep, MMR lambda curve, and ANN recall/latency sweep are specified follow-up experiments, not completed results.
+- The optional Kafka path has not yet earned a production claim; its benchmark questions are listed above.
+
+See [ENGINEERING_LOG.md](ENGINEERING_LOG.md) for failures and fixes observed during implementation.

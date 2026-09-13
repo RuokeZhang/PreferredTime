@@ -1,17 +1,19 @@
 """
 模拟“外部API流式发送 user events”的客户端脚本：
 
-- 持续向 FastAPI 的 POST /events 发送用户评分事件
-- 用于演示：API Producer -> Kafka -> Consumer -> (S3/SQLite)
+- 持续向 FastAPI 的 POST /v1/events 发送用户评分事件
+- 用于演示：API Producer -> Kafka -> Consumer -> S3
 
 用法示例：
-  python3 scripts/simulate_event_stream.py --api-url http://localhost:8082/events --rate 5 --duration 30
+  python3 scripts/simulate_event_stream.py \
+    --api-url http://localhost:8082/v1/events --rate 5 --duration 30
 """
 
 import argparse
 import random
 import time
-from datetime import datetime
+import uuid
+from datetime import datetime, timezone
 from typing import Tuple
 
 import requests
@@ -19,7 +21,11 @@ import requests
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--api-url", default="http://localhost:8082/events", help="事件入口URL")
+    p.add_argument(
+        "--api-url",
+        default="http://localhost:8082/v1/events",
+        help="事件入口URL",
+    )
     p.add_argument("--rate", type=float, default=2.0, help="每秒发送事件数（可为小数）")
     p.add_argument("--duration", type=int, default=20, help="持续秒数")
     p.add_argument("--user-range", default="1-50", help="用户ID范围，例如 1-50")
@@ -57,10 +63,11 @@ def main():
 
     while time.time() < end_at:
         event = {
+            "event_id": str(uuid.uuid4()),
             "user_id": random.randint(user_lo, user_hi),
             "movie_id": random.randint(movie_lo, movie_hi),
             "rating": round(random.uniform(1.0, 5.0), 1),
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
         try:
@@ -81,5 +88,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
