@@ -8,7 +8,13 @@ import pandas as pd
 from recsys.data import build_temporal_split
 from recsys.evaluation import evaluate_recommendations, ndcg_at_k, recall_at_k
 from recsys.pipeline import RecommendationPipeline
-from recsys.ranking import RankingExample, build_feature_matrix, sample_ranking_group
+from recsys.ranking import (
+    FEATURE_NAMES,
+    LambdaRanker,
+    RankingExample,
+    build_feature_matrix,
+    sample_ranking_group,
+)
 from recsys.reranking import mmr_rerank
 from recsys.retrieval import Candidate, MultiRouteRetriever
 from recsys.artifacts import (
@@ -111,6 +117,45 @@ class RetrievalTests(unittest.TestCase):
 
         self.assertEqual([candidate.item_id for candidate in candidates], [3])
 
+    def test_hnsw_expands_search_depth_when_requested_k_is_larger(self):
+        try:
+            __import__("hnswlib")
+        except ImportError:
+            self.skipTest("hnswlib is not installed")
+        random = np.random.default_rng(7)
+        vectors = {
+            item_id: random.normal(size=8).astype(np.float32)
+            for item_id in range(300)
+        }
+        from recsys.retrieval import VectorIndex
+
+        index = VectorIndex(vectors, backend="hnsw", ef_search=10)
+
+        self.assertEqual(len(index.query(vectors[0], 100)), 100)
+
+    def test_hnsw_uses_counted_exact_fallback_when_graph_cannot_return_k(self):
+        class FailingIndex:
+            def set_ef(self, value):
+                self.ef = value
+
+            def knn_query(self, vector, k):
+                raise RuntimeError("graph cannot return k")
+
+        from recsys.retrieval import VectorIndex
+
+        vectors = {
+            1: np.array([1.0, 0.0]),
+            2: np.array([0.0, 1.0]),
+        }
+        index = VectorIndex(vectors)
+        index.backend = "hnsw"
+        index._index = FailingIndex()
+
+        results = index.query(np.array([1.0, 0.0]), 2)
+
+        self.assertEqual([item_id for item_id, _ in results], [1, 2])
+        self.assertEqual(index.fallback_count, 1)
+
     def test_sampled_ranking_group_uses_hard_negative_ratio(self):
         candidates = [Candidate(item_id=item_id) for item_id in range(1, 10)]
         group, labels = sample_ranking_group(
@@ -169,6 +214,17 @@ class RerankingAndEvaluationTests(unittest.TestCase):
 
         self.assertEqual(reranked, [1, 3])
 
+    def test_mmr_with_full_relevance_weight_skips_diversity_reordering(self):
+        reranked = mmr_rerank(
+            [1, 2, 3],
+            {1: 0.2, 2: 0.9, 3: 0.5},
+            {},
+            limit=2,
+            relevance_weight=1.0,
+        )
+
+        self.assertEqual(reranked, [2, 3])
+
     def test_offline_metrics_use_full_relevant_sets(self):
         self.assertEqual(recall_at_k([1, 2], {2, 3}, 2), 0.5)
         self.assertGreater(ndcg_at_k([2, 1], {2, 3}, 2), 0.5)
@@ -217,6 +273,22 @@ class RerankingAndEvaluationTests(unittest.TestCase):
 
 
 class TrainingAndArtifactTests(unittest.TestCase):
+    def test_lambdarank_fits_grouped_training_examples(self):
+        try:
+            __import__("lightgbm")
+            __import__("sklearn")
+        except ImportError:
+            self.skipTest("LightGBM integration dependencies are not installed")
+        features = np.zeros((4, len(FEATURE_NAMES)), dtype=np.float32)
+        features[:, 0] = [1.0, 0.0, 0.8, 0.2]
+        labels = np.array([1, 0, 1, 0], dtype=np.int32)
+
+        ranker = LambdaRanker(
+            n_estimators=2, min_child_samples=1, min_data_in_bin=1
+        ).fit(features, labels, [2, 2])
+
+        self.assertEqual(ranker.predict(features).shape, (4,))
+
     def test_content_vectors_combine_genres_and_genome_scores(self):
         movies = pd.DataFrame(
             [

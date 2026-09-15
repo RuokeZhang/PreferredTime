@@ -53,6 +53,8 @@ python3 -m scripts.run_offline_experiment \
 
 For a quick pipeline check, add `--limit-users 100`. That option is for development only and must not be used for the final reported matrix.
 
+LambdaRank training uses up to 10,000 validation users by default so the sampled hard-negative matrix stays within a single-machine memory budget. Change it with `--ranker-training-users`; evaluation still uses every eligible test user unless `--limit-users` is explicitly supplied.
+
 To compare a candidate with production, pass a JSON file containing the production metrics:
 
 ```bash

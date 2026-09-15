@@ -22,6 +22,7 @@ def train_als_vectors(
     iterations: int = 20,
     alpha: float = 20.0,
     seed: int = 7,
+    num_threads: int = 4,
 ) -> FactorizationResult:
     try:
         from implicit.als import AlternatingLeastSquares
@@ -47,6 +48,7 @@ def train_als_vectors(
         regularization=regularization,
         iterations=iterations,
         random_state=seed,
+        num_threads=num_threads,
     )
     model.fit(user_items, show_progress=False)
     return FactorizationResult(
@@ -167,6 +169,7 @@ def build_ranker_dataset(
     positive_threshold: float = 4.0,
     negative_ratio: int = 4,
     random_negative_ratio: int = 1,
+    max_users: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[int]]:
     history_by_user = {
         int(user_id): list(group.sort_values("timestamp")["movieId"].astype(int))
@@ -187,7 +190,10 @@ def build_ranker_dataset(
     all_examples: list[RankingExample] = []
     all_labels: list[int] = []
     group_sizes = []
-    for user_id in sorted(validation_positives):
+    ranker_users = sorted(validation_positives)
+    if max_users is not None:
+        ranker_users = ranker_users[:max_users]
+    for user_id in ranker_users:
         positives = validation_positives[user_id]
         if not positives or user_id not in history_by_user:
             continue

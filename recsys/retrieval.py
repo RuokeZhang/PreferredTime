@@ -38,6 +38,7 @@ class VectorIndex:
         self.hnsw_m = hnsw_m
         self.ef_construction = ef_construction
         self.ef_search = ef_search
+        self.fallback_count = 0
         self._index = None
         if backend == "hnsw":
             self._build_hnsw_index()
@@ -67,12 +68,24 @@ class VectorIndex:
         normalized = normalized / norm
         result_limit = min(limit, len(self.item_ids))
         if self.backend == "hnsw":
-            labels, distances = self._index.knn_query(normalized, k=result_limit)
-            return [
-                (int(self.item_ids[label]), float(1.0 - distance))
-                for label, distance in zip(labels[0], distances[0])
-            ]
-        scores = self.matrix @ normalized
+            self._index.set_ef(
+                min(max(self.ef_search, result_limit), len(self.item_ids))
+            )
+            try:
+                labels, distances = self._index.knn_query(normalized, k=result_limit)
+                return [
+                    (int(self.item_ids[label]), float(1.0 - distance))
+                    for label, distance in zip(labels[0], distances[0])
+                ]
+            except RuntimeError:
+                self.fallback_count += 1
+                return self._exact_query(normalized, result_limit)
+        return self._exact_query(normalized, result_limit)
+
+    def _exact_query(
+        self, normalized_vector: np.ndarray, result_limit: int
+    ) -> list[tuple[int, float]]:
+        scores = self.matrix @ normalized_vector
         order = np.argsort(-scores, kind="stable")[:result_limit]
         return [(int(self.item_ids[index]), float(scores[index])) for index in order]
 
@@ -117,6 +130,7 @@ class MultiRouteRetriever:
             else [int(item_id) for item_id in positive_history]
         )
         seen_items = set(history_items)
+        retrieval_limit = per_route + min(len(seen_items), per_route * 2)
         candidates: dict[int, Candidate] = {}
 
         user_vector = self.user_vectors.get(user_id)
@@ -124,7 +138,7 @@ class MultiRouteRetriever:
             self._merge_route(
                 candidates,
                 "u2i",
-                self.collaborative_index.query(user_vector, per_route + len(seen_items)),
+                self.collaborative_index.query(user_vector, retrieval_limit),
                 seen_items,
                 per_route,
             )
@@ -139,7 +153,7 @@ class MultiRouteRetriever:
                 candidates,
                 "i2i",
                 self.collaborative_index.query(
-                    np.mean(collaborative_history, axis=0), per_route + len(seen_items)
+                    np.mean(collaborative_history, axis=0), retrieval_limit
                 ),
                 seen_items,
                 per_route,
@@ -155,7 +169,7 @@ class MultiRouteRetriever:
                 candidates,
                 "semantic",
                 self.semantic_index.query(
-                    np.mean(semantic_history, axis=0), per_route + len(seen_items)
+                    np.mean(semantic_history, axis=0), retrieval_limit
                 ),
                 seen_items,
                 per_route,

@@ -109,4 +109,5 @@ def benchmark_ann(
         "exact_p99_ms": float(np.percentile(exact_latencies, 99)),
         "ann_p50_ms": float(np.percentile(approximate_latencies, 50)),
         "ann_p99_ms": float(np.percentile(approximate_latencies, 99)),
+        "exact_fallbacks": float(approximate_index.fallback_count),
     }

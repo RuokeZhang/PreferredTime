@@ -73,6 +73,7 @@ class LambdaRanker:
             "learning_rate": 0.05,
             "num_leaves": 31,
             "random_state": 7,
+            "n_jobs": 4,
             "verbosity": -1,
             **parameters,
         }

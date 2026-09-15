@@ -35,6 +35,10 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--positive-threshold", type=float, default=4.0)
     parser.add_argument("--negative-ratio", type=int, default=4)
     parser.add_argument("--random-negative-ratio", type=int, default=1)
+    parser.add_argument("--ranker-training-users", type=int, default=10_000)
+    parser.add_argument("--als-factors", type=int, default=64)
+    parser.add_argument("--als-iterations", type=int, default=20)
+    parser.add_argument("--als-threads", type=int, default=4)
     parser.add_argument("--mmr-relevance-weight", type=float, default=0.8)
     parser.add_argument("--limit-users", type=int)
     parser.add_argument("--production-metrics")
@@ -54,8 +58,16 @@ def build_retriever(
     semantic_vectors: dict[int, np.ndarray],
     backend: str,
     enabled_routes: tuple[str, ...] = MultiRouteRetriever.ROUTES,
+    als_factors: int = 64,
+    als_iterations: int = 20,
+    als_threads: int = 4,
 ) -> tuple[MultiRouteRetriever, dict[int, dict[str, float]]]:
-    factorization = train_als_vectors(ratings)
+    factorization = train_als_vectors(
+        ratings,
+        factors=als_factors,
+        iterations=als_iterations,
+        num_threads=als_threads,
+    )
     user_features, item_features, popularity = build_training_features(ratings)
     retriever = MultiRouteRetriever(
         user_vectors=factorization.user_vectors,
@@ -106,6 +118,7 @@ def evaluate_pipeline(
 
 def main() -> None:
     arguments = parse_arguments()
+    print("[1/7] Loading MovieLens data", flush=True)
     ratings = load_ratings(arguments.ratings)
     movies = pd.read_csv(arguments.movies)
     genome_scores = (
@@ -114,10 +127,17 @@ def main() -> None:
     split = build_temporal_split(
         ratings, positive_threshold=arguments.positive_threshold
     )
+    print("[2/7] Building genre and genome vectors", flush=True)
     semantic_vectors = build_content_vectors(movies, genome_scores)
 
+    print("[3/7] Training validation-period ALS retrieval", flush=True)
     training_retriever, training_item_features = build_retriever(
-        split.train, semantic_vectors, arguments.backend
+        split.train,
+        semantic_vectors,
+        arguments.backend,
+        als_factors=arguments.als_factors,
+        als_iterations=arguments.als_iterations,
+        als_threads=arguments.als_threads,
     )
     training_user_features, _, _ = build_training_features(split.train)
     ranker_features, ranker_labels, group_sizes = build_ranker_dataset(
@@ -129,12 +149,20 @@ def main() -> None:
         positive_threshold=arguments.positive_threshold,
         negative_ratio=arguments.negative_ratio,
         random_negative_ratio=arguments.random_negative_ratio,
+        max_users=arguments.ranker_training_users,
     )
+    print("[4/7] Training LightGBM LambdaRank", flush=True)
     ranker = LambdaRanker().fit(ranker_features, ranker_labels, group_sizes)
 
     pretest = pd.concat([split.train, split.validation], ignore_index=True)
+    print("[5/7] Retraining ALS on train plus validation", flush=True)
     retriever, item_features = build_retriever(
-        pretest, semantic_vectors, arguments.backend
+        pretest,
+        semantic_vectors,
+        arguments.backend,
+        als_factors=arguments.als_factors,
+        als_iterations=arguments.als_iterations,
+        als_threads=arguments.als_threads,
     )
     user_features, _, _ = build_training_features(pretest)
     version = build_model_version(split.test_cutoff, repository_sha())
@@ -168,6 +196,7 @@ def main() -> None:
         ),
     }
     experiment_matrix = {}
+    print("[6/7] Evaluating ablation matrix", flush=True)
     for name, (variant_ranker, routes, relevance_weight) in variants.items():
         retriever.enabled_routes = routes
         variant_pipeline = RecommendationPipeline(
@@ -231,6 +260,7 @@ def main() -> None:
             arguments.s3_model_bucket,
             prefix=arguments.s3_model_prefix,
         )
+    print("[7/7] Published versioned artifact", flush=True)
     print(json.dumps(report, indent=2))
 
 
