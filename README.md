@@ -4,23 +4,25 @@ An offline-first movie recommendation system for measuring the trade-offs among 
 
 ## Experiment matrix
 
-The repository generates this table from a global temporal test split. Cells remain blank until the MovieLens-25M experiment is run; no result is estimated or copied from another system.
+Measured on the full MovieLens-25M global temporal test split with 3,946 eligible users. The run used commit `1c96ad1`, 32 ALS factors, 10 ALS iterations, 10,000 LambdaRank training users, and HNSW retrieval.
 
 | Variant | Recall@20 | NDCG@10 | Coverage | Diversity | P99 (ms) |
 |---|---:|---:|---:|---:|---:|
-| Popularity | | | | | |
-| ALS + ANN | | | | | |
-| + semantic retrieval | | | | | |
-| + LightGBM LambdaRank | | | | | |
-| + MMR | | | | | |
+| Popularity | 0.0369 | 0.0647 | 0.0075 | 0.3116 | 5.51 |
+| ALS + ANN | 0.0628 | 0.0826 | 0.1360 | 0.3850 | 13.81 |
+| + semantic retrieval | 0.0832 | 0.1121 | 0.1193 | 0.3071 | 26.74 |
+| + LightGBM LambdaRank | 0.1181 | 0.1610 | 0.0337 | 0.2543 | 24.73 |
+| + MMR | 0.1177 | 0.1608 | 0.0343 | 0.2560 | 19.18 |
 
-`scripts/run_offline_experiment.py` writes measured values to `experiment_matrix.json` inside the versioned artifact directory.
+The final system improves Recall@20 by 218.7% and NDCG@10 by 148.6% over popularity. MMR trades 0.3% relative Recall@20 for a 0.7% relative diversity gain compared with LambdaRank alone. `scripts/run_offline_experiment.py` writes unrounded values to `experiment_matrix.json` inside the versioned artifact directory.
 
 Measure ANN approximation loss and latency against exact cosine search with:
 
 ```bash
 python3 -m scripts.benchmark_ann --model-version <training_cutoff>-<git_sha>
 ```
+
+For the published run, HNSW at `ef_search=200` achieved Recall@100 of 0.9885 over 200 queries. Its P50/P99 latency was 0.22/0.38 ms versus 2.31/2.63 ms for exact cosine search, with zero exact-search fallbacks.
 
 ## Implemented pipeline
 
@@ -48,8 +50,13 @@ python3 -m scripts.run_offline_experiment \
   --genome-scores data/ml-25m/genome-scores.csv \
   --output artifacts \
   --backend hnsw \
-  --s3-model-bucket preferredtime-models
+  --als-factors 32 \
+  --als-iterations 10 \
+  --als-threads 4 \
+  --ranker-training-users 10000
 ```
+
+This command produced `lambdarank/1515033900-1c96ad1185f4`; the validation and test cutoffs were 2016-06-25 and 2018-01-04 UTC. Add `--s3-model-bucket preferredtime-models` when S3 publication is configured.
 
 For a quick pipeline check, add `--limit-users 100`. That option is for development only and must not be used for the final reported matrix.
 
@@ -113,7 +120,7 @@ CI checks temporal isolation, full-catalog metrics, route fusion, hard-negative 
 - MovieLens has no exposure log. Ranker negatives are sampled, so the project cannot estimate or correct position and exposure bias.
 - Every quality conclusion is offline until a real traffic source exists.
 - Genre and genome features do not provide the full-catalog semantic coverage planned for TMDB overview tagging.
-- The controlled-vocabulary LLM tagger, genome-agreement study, sequential-ranker comparison, threshold sensitivity sweep, MMR lambda curve, and ANN recall/latency sweep are specified follow-up experiments, not completed results.
+- The controlled-vocabulary LLM tagger, genome-agreement study, sequential-ranker comparison, threshold sensitivity sweep, MMR lambda curve, and ANN parameter sweep are specified follow-up experiments, not completed results. The reported ANN result covers one configuration.
 - The optional Kafka path has not yet earned a production claim; its benchmark questions are listed above.
 
 See [ENGINEERING_LOG.md](ENGINEERING_LOG.md) for failures and fixes observed during implementation.

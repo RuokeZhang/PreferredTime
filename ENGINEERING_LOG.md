@@ -35,3 +35,9 @@ The smoke experiment reached `LGBMRanker` construction and failed because LightG
 ## 2026-09-15 — MMR dominated serving latency
 
 The first successful 100-user experiment measured MMR at 53.4 ms P50 and 77.0 ms P99, pushing end-to-end P99 to 121.2 ms. The implementation recomputed pairwise cosine similarity in nested Python loops, and even the `lambda=1` ranking-only baseline paid that cost. MMR now computes one normalized similarity matrix with NumPy and updates the maximum redundancy vector incrementally; `lambda=1` bypasses similarity work entirely.
+
+## 2026-09-15 — full MovieLens-25M experiment
+
+The final run evaluated all 3,946 eligible test users with 32-factor ALS, 10 iterations, 10,000 LambdaRank training users, and HNSW retrieval. The MMR system reached 0.1177 Recall@20 and 0.1608 NDCG@10 at 19.18 ms end-to-end P99, compared with 0.0369 and 0.0647 for popularity. The versioned local artifact is `lambdarank/1515033900-1c96ad1185f4` and occupies 424 MB.
+
+An independent 200-query benchmark at `k=100` and `ef_search=200` measured HNSW Recall@100 at 0.9885. HNSW P99 was 0.38 ms versus 2.63 ms for exact cosine search, and no query required the exact-search fallback.
